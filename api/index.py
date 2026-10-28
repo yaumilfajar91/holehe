@@ -1,18 +1,15 @@
 import sys
 from pathlib import Path
 import re
+import traceback
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-import httpx
-import trio
 
-# Pastikan root project masuk ke sys.path agar modul 'holehe' terbaca di Vercel
+# Pastikan root project masuk ke sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
-
-from holehe.core import import_submodules, get_functions, launch_module
 
 app = FastAPI(title="Holehe OSINT Vercel")
 
@@ -25,13 +22,26 @@ app.add_middleware(
 
 EMAIL_REGEX = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
 
-# Load modul Holehe saat startup
-modules = import_submodules("holehe.modules")
-all_websites = get_functions(modules)
+# Cache daftar website agar hanya di-load sekali saat pertama kali dipanggil (Lazy Loading)
+_cached_websites = None
+
+def get_websites():
+    global _cached_websites
+    if _cached_websites is None:
+        try:
+            from holehe.core import import_submodules, get_functions
+            modules = import_submodules("holehe.modules")
+            _cached_websites = get_functions(modules)
+        except Exception as e:
+            raise RuntimeError(f"Gagal memuat modul holehe: {e}\n{traceback.format_exc()}")
+    return _cached_websites
 
 async def run_holehe_async(email: str, target_websites, timeout: float = 3.5):
+    import httpx
+    import trio
+    from holehe.core import launch_module
+
     out = []
-    # Batasi timeout per request agar Vercel tidak mengalami 504 Gateway Timeout
     async with httpx.AsyncClient(timeout=timeout) as client:
         async with trio.open_nursery() as nursery:
             for website in target_websites:
@@ -83,7 +93,7 @@ def index():
           </button>
         </div>
 
-        <!-- Mode Pemindaian (Menghindari Vercel Timeout) -->
+        <!-- Mode Pemindaian -->
         <div class="flex flex-wrap items-center gap-4 text-xs text-slate-400 border-t border-slate-800/80 pt-4">
           <span class="font-medium text-slate-300">Mode Scan:</span>
           <label class="flex items-center gap-1.5 cursor-pointer hover:text-white">
@@ -99,7 +109,7 @@ def index():
       
       <!-- Loading Indicator -->
       <div id="loader" class="hidden mt-5 text-center text-sm text-indigo-400 bg-indigo-950/30 border border-indigo-900/40 rounded-xl p-3">
-        ⏳ Sedang memindai platform target... Mohon tunggu sebentar.
+        ⏳ Sedang memindai platform target... Mohon tunggu sebentar (~5-10 detik).
       </div>
     </div>
 
@@ -237,14 +247,15 @@ def index():
 @app.get("/api/scan")
 def api_scan(
     email: str = Query(..., description="Target email"),
-    limit: int = Query(35, description="Batas jumlah situs (untuk menghindari timeout di Vercel)")
+    limit: int = Query(35, description="Batas jumlah situs")
 ):
     if not re.match(EMAIL_REGEX, email):
         raise HTTPException(status_code=400, detail="Format email tidak valid.")
 
-    selected_sites = all_websites[:limit]
-
     try:
+        import trio
+        all_sites = get_websites()
+        selected_sites = all_sites[:limit]
         results = trio.run(run_holehe_async, email, selected_sites, 3.5)
         return {
             "email": email,
@@ -253,4 +264,3 @@ def api_scan(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-

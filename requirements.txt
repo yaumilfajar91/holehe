@@ -1,3 +1,4 @@
+holehe>=1.61
 fastapi>=0.100.0
 uvicorn>=0.22.0
 trio>=0.22.0
@@ -6,4 +7,3 @@ beautifulsoup4>=4.12.0
 termcolor
 tqdm
 colorama
-
